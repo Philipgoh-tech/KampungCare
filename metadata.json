@@ -1,0 +1,6 @@
+{
+  "name": "KampungCare — Singapore Babysitting Marketplace",
+  "description": "Search Founder-vetted babysitters by Singapore postal code, pay securely in SGD via Stripe & PayNow, and unlock direct WhatsApp coordination.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
