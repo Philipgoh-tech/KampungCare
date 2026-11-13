@@ -29,6 +29,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('find');
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [ownSitterProfile, setOwnSitterProfile] = useState<SitterItem | null>(null);
 
@@ -221,12 +222,33 @@ export default function App() {
   ]);
 
   const handleSignIn = async () => {
+    if (authLoading) return;
     setAuthLoading(true);
+    setAuthError(null);
     try {
       await signInWithPopup(auth, googleAuthProvider);
       await loadUserContext();
-    } catch (err) {
-      console.error('Sign in failed:', err);
+    } catch (err: unknown) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code)
+          : '';
+      if (
+        code === 'auth/popup-closed-by-user' ||
+        code === 'auth/cancelled-popup-request'
+      ) {
+        setAuthError(
+          'Google sign-in window was closed before completing. Click Sign In to try again.'
+        );
+      } else if (code === 'auth/popup-blocked') {
+        setAuthError(
+          'Your browser blocked the Google sign-in pop-up. Please allow pop-ups for this site and click Sign In again.'
+        );
+      } else {
+        setAuthError(
+          'Could not complete Google sign-in. Please ensure pop-ups are allowed and try again.'
+        );
+      }
     } finally {
       setAuthLoading(false);
     }
@@ -326,6 +348,30 @@ export default function App() {
       />
 
       <main className="flex-1 max-w-[1200px] w-full mx-auto px-4 sm:px-6 py-8 sm:py-10">
+        {authError && (
+          <div
+            role="status"
+            className="mb-6 p-4 rounded-xl bg-[#FFFBEB] border border-[#FDE68A] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-[#92400E]"
+          >
+            <span>{authError}</span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleSignIn}
+                className="px-3 py-1.5 bg-[#14453D] text-white font-semibold rounded-lg cursor-pointer whitespace-nowrap"
+              >
+                Try Again
+              </button>
+              <button
+                type="button"
+                onClick={() => setAuthError(null)}
+                className="px-2.5 py-1.5 border border-[#F59E0B]/40 rounded-lg font-medium cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
         {activeTab === 'find' && (
           <SitterFeed
             sitters={sitters}

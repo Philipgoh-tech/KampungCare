@@ -3,11 +3,89 @@ import { SG_POSTAL_REGEX } from './validation.ts';
 export interface OneMapAddressResult {
   postalCode: string;
   buildingName: string;
+  blockNo: string;
+  roadName: string;
   streetAddress: string;
+  fullAddress: string;
   neighborhood: string;
   latitude: number;
   longitude: number;
+  svy21X: number | null;
+  svy21Y: number | null;
   source: 'onemap' | 'singapore-district-fallback';
+}
+
+interface CachedOneMapToken {
+  accessToken: string;
+  expiresAtMs: number;
+}
+
+let cachedToken: CachedOneMapToken | null = null;
+
+function getOneMapBaseUrl(): string {
+  return (process.env.ONEMAP_BASE_URL || 'https://www.onemap.gov.sg').replace(/\/+$/, '');
+}
+
+function getOneMapTimeoutMs(): number {
+  const parsed = Number(process.env.ONEMAP_TIMEOUT_MS || 3500);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3500;
+}
+
+async function getOneMapAuthToken(): Promise<string | null> {
+  const staticToken = process.env.ONEMAP_API_TOKEN?.trim();
+  if (staticToken) {
+    return staticToken;
+  }
+
+  const email = process.env.ONEMAP_EMAIL?.trim();
+  const password = process.env.ONEMAP_PASSWORD?.trim();
+  if (
+    !email ||
+    !password ||
+    email.includes('example.com') ||
+    password.includes('your_onemap_password')
+  ) {
+    return null;
+  }
+
+  if (cachedToken && Date.now() < cachedToken.expiresAtMs - 60_000) {
+    return cachedToken.accessToken;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), getOneMapTimeoutMs());
+
+    const res = await fetch(`${getOneMapBaseUrl()}/api/auth/post/getToken`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      access_token?: string;
+      expiry_timestamp?: string | number;
+    };
+
+    if (data.access_token) {
+      const expirySec = Number(data.expiry_timestamp);
+      const expiresAtMs = Number.isFinite(expirySec)
+        ? expirySec * 1000
+        : Date.now() + 3 * 24 * 60 * 60 * 1000;
+      cachedToken = {
+        accessToken: data.access_token,
+        expiresAtMs,
+      };
+      return cachedToken.accessToken;
+    }
+  } catch (err) {
+    console.warn('OneMap auth token fetch failed, continuing with public search:', (err as Error).message);
+  }
+
+  return null;
 }
 
 // Reference Singapore postal sector coordinates if OneMap public endpoint is unreachable
@@ -75,16 +153,22 @@ export async function lookupSingaporePostalCode(
   }
 
   try {
-    const url = `https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${encodeURIComponent(
+    const token = await getOneMapAuthToken();
+    const url = `${getOneMapBaseUrl()}/api/common/elastic/search?searchVal=${encodeURIComponent(
       postalCode
     )}&returnGeom=Y&getAddrDetails=Y&pageNum=1`;
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500);
+    const timeout = setTimeout(() => controller.abort(), getOneMapTimeoutMs());
+
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
 
     const response = await fetch(url, {
       signal: controller.signal,
-      headers: { Accept: 'application/json' },
+      headers,
     });
     clearTimeout(timeout);
 
@@ -98,6 +182,8 @@ export async function lookupSingaporePostalCode(
           ADDRESS?: string;
           LATITUDE?: string;
           LONGITUDE?: string;
+          X?: string;
+          Y?: string;
           POSTAL?: string;
         }>;
       };
@@ -105,25 +191,30 @@ export async function lookupSingaporePostalCode(
       const match = data.results?.[0];
       if (match && match.LATITUDE && match.LONGITUDE) {
         const buildingRaw = match.BUILDING && match.BUILDING !== 'NIL' ? match.BUILDING : '';
-        const streetRaw = [match.BLK_NO, match.ROAD_NAME]
-          .filter((part) => part && part !== 'NIL')
-          .join(' ')
-          .trim();
+        const blockNo = match.BLK_NO && match.BLK_NO !== 'NIL' ? match.BLK_NO : '';
+        const roadName = match.ROAD_NAME && match.ROAD_NAME !== 'NIL' ? toTitleCase(match.ROAD_NAME) : '';
+        const streetRaw = [blockNo, roadName].filter(Boolean).join(' ').trim();
 
         const buildingName =
-          buildingRaw || (streetRaw ? `Block ${streetRaw}` : `Postal ${postalCode}`);
-        const streetAddress = streetRaw || match.ADDRESS || `Singapore ${postalCode}`;
+          buildingRaw ? toTitleCase(buildingRaw) : streetRaw ? `Block ${streetRaw}` : `Postal ${postalCode}`;
+        const streetAddress = streetRaw || toTitleCase(match.ADDRESS || `Singapore ${postalCode}`);
+        const fullAddress = match.ADDRESS ? toTitleCase(match.ADDRESS) : `${buildingName}, ${streetAddress}, Singapore ${postalCode}`;
 
         return {
           postalCode,
-          buildingName: toTitleCase(buildingName),
-          streetAddress: toTitleCase(streetAddress),
+          buildingName,
+          blockNo,
+          roadName,
+          streetAddress,
+          fullAddress,
           neighborhood: inferNeighborhoodFromAddress(
             `${buildingName} ${streetAddress}`,
             postalCode
           ),
           latitude: Number.parseFloat(match.LATITUDE),
           longitude: Number.parseFloat(match.LONGITUDE),
+          svy21X: match.X ? Number.parseFloat(match.X) : null,
+          svy21Y: match.Y ? Number.parseFloat(match.Y) : null,
           source: 'onemap',
         };
       }
@@ -145,10 +236,15 @@ export async function lookupSingaporePostalCode(
   return {
     postalCode,
     buildingName: fallback.building,
+    blockNo: '',
+    roadName: fallback.street,
     streetAddress: `${fallback.street}, Singapore ${postalCode}`,
+    fullAddress: `${fallback.building}, ${fallback.street}, Singapore ${postalCode}`,
     neighborhood: fallback.neighborhood,
     latitude: fallback.lat,
     longitude: fallback.lng,
+    svy21X: null,
+    svy21Y: null,
     source: 'singapore-district-fallback',
   };
 }
